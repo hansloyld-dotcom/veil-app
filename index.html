@@ -272,7 +272,7 @@
     //  POSTS - READ (REALTIME)
     // ══════════════════════════════════════════════════════
     function loadFeed() {
-      const q = query(collection(db, 'posts'), where('deleted','==',false), orderBy('createdAt','desc'), limit(30));
+      const q = query(collection(db, 'posts'), orderBy('createdAt','desc'), limit(30));
       unsubFeed = onSnapshot(q, (snap) => {
         const container = document.getElementById('feed-container');
         container.innerHTML = '';
@@ -282,6 +282,7 @@
         }
         snap.forEach(docSnap => {
           const post = { id: docSnap.id, ...docSnap.data() };
+          if (post.deleted) return; // skip deleted posts
           container.appendChild(createPostCard(post));
         });
       });
@@ -611,7 +612,7 @@
     // ══════════════════════════════════════════════════════
     window.loadProfilePosts = async function() {
       if (!currentUser) return;
-      const q = query(collection(db, 'posts'), where('uid','==',currentUser.uid), where('deleted','==',false), orderBy('createdAt','desc'));
+      const q = query(collection(db, 'posts'), where('uid','==',currentUser.uid), orderBy('createdAt','desc'));
       const snap = await getDocs(q);
       const grid = document.getElementById('profile-grid');
       grid.innerHTML = '';
@@ -667,13 +668,76 @@
       return (str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
     }
 
-    // Make functions available globally
+    // ── Expose semua ke window (module script terisolasi dari global scope) ──
     window.db = db;
     window.storage = storage;
     window.auth = auth;
-    window.currentUser = () => currentUser;
-    window.currentUserData = currentUserData;
     window.formatTime = formatTime;
+
+    window.switchScreen = function(name) {
+      document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+      const scr = document.getElementById('screen-' + name);
+      if(scr) scr.classList.add('active');
+      const navEl = document.getElementById('nav-' + name);
+      if(navEl) navEl.classList.add('active');
+      const fab = document.getElementById('fab');
+      if(fab) fab.style.display = name === 'feed' ? 'flex' : 'none';
+    };
+    window.showToast = function(msg) {
+      const t = document.getElementById('toast');
+      if(!t) return;
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(window._toastTimer);
+      window._toastTimer = setTimeout(() => t.classList.remove('show'), 2500);
+    };
+    window.showLoading = function(text) {
+      const el = document.getElementById('loading-text');
+      if(el) el.textContent = text || 'Memuat...';
+      const ov = document.getElementById('loading-overlay');
+      if(ov) ov.classList.add('active');
+    };
+    window.hideLoading = function() {
+      const ov = document.getElementById('loading-overlay');
+      if(ov) ov.classList.remove('active');
+    };
+    window.openModal = function(id) { const el=document.getElementById(id); if(el) el.classList.add('active'); };
+    window.closeModal = function(id) { const el=document.getElementById(id); if(el) el.classList.remove('active'); };
+    window.closeModalBg = function(e,id) { if(e.target===document.getElementById(id)) window.closeModal(id); };
+    window.togglePostMenu = function(postId) {
+      const menu = document.getElementById('post-menu-'+postId);
+      if(menu) menu.style.display = menu.style.display==='none' ? 'block' : 'none';
+    };
+    window.switchAuthTab = function(tab) {
+      document.getElementById('auth-form-login').style.display = tab==='login' ? 'flex' : 'none';
+      document.getElementById('auth-form-register').style.display = tab==='register' ? 'flex' : 'none';
+      document.getElementById('tab-login').classList.toggle('active', tab==='login');
+      document.getElementById('tab-register').classList.toggle('active', tab==='register');
+    };
+    window.previewImage = function(input) {
+      const file = input.files[0]; if(!file) return;
+      const reader = new FileReader();
+      reader.onload = e => {
+        const p = document.getElementById('compose-preview');
+        p.src = e.target.result; p.style.display = 'block';
+      };
+      reader.readAsDataURL(file);
+    };
+    window.switchAdminTab = function(tab) {
+      document.getElementById('admin-reports').style.display = tab==='reports' ? 'block' : 'none';
+      document.getElementById('admin-users').style.display = tab==='users' ? 'block' : 'none';
+      document.getElementById('atab-reports').classList.toggle('active', tab==='reports');
+      document.getElementById('atab-users').classList.toggle('active', tab==='users');
+    };
+    window.toggleSetting = function(el, key) {
+      el.classList.toggle('on');
+      localStorage.setItem('veil_setting_'+key, el.classList.contains('on'));
+      window.showToast(el.classList.contains('on') ? '✅ Diaktifkan' : '🔕 Dinonaktifkan');
+    };
+    window.changeAnonName = function() { window.showToast('Fitur ini segera hadir! 🎲'); };
+    window.showAbout = function() { alert('Veil v1.0.0\nPlatform komunitas anonim\nDibuat dengan 💜'); };
+    window.showNotifSettings = function() { window.showToast('Pengaturan notifikasi disimpan!'); };
   </script>
 
   <style>
@@ -1211,107 +1275,8 @@
 </div>
 
 <script>
-// ═══════════════════════════════════════════════
-//  UI UTILITIES
-// ═══════════════════════════════════════════════
-function switchScreen(name) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.getElementById('screen-' + name).classList.add('active');
-  const navEl = document.getElementById('nav-' + name);
-  if (navEl) navEl.classList.add('active');
-  const hideFab = !['feed'].includes(name);
-  document.getElementById('fab').style.display = hideFab ? 'none' : 'flex';
-}
-
-function switchAuthTab(tab) {
-  document.getElementById('auth-form-login').style.display = tab === 'login' ? 'flex' : 'none';
-  document.getElementById('auth-form-register').style.display = tab === 'register' ? 'flex' : 'none';
-  document.getElementById('tab-login').classList.toggle('active', tab === 'login');
-  document.getElementById('tab-register').classList.toggle('active', tab === 'register');
-}
-
-function openModal(id) { document.getElementById(id).classList.add('active'); }
-function closeModal(id) { document.getElementById(id).classList.remove('active'); }
-function closeModalBg(e, id) { if (e.target === document.getElementById(id)) closeModal(id); }
-
-let toastTimer;
-function showToast(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2500);
-}
-
-function showLoading(text) {
-  document.getElementById('loading-text').textContent = text || 'Memuat...';
-  document.getElementById('loading-overlay').classList.add('active');
-}
-function hideLoading() {
-  document.getElementById('loading-overlay').classList.remove('active');
-}
-
-function togglePostMenu(postId) {
-  const menu = document.getElementById('post-menu-' + postId);
-  if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
-}
-
-function previewImage(input) {
-  const file = input.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = e => {
-    const preview = document.getElementById('compose-preview');
-    preview.src = e.target.result;
-    preview.style.display = 'block';
-  };
-  reader.readAsDataURL(file);
-}
-
-// ─── Settings toggles ───
-function toggleSetting(el, key) {
-  el.classList.toggle('on');
-  const isOn = el.classList.contains('on');
-  localStorage.setItem('veil_setting_' + key, isOn);
-  showToast(isOn ? '✅ Diaktifkan' : '🔕 Dinonaktifkan');
-}
-
-function changeAnonName() {
-  if (!window.currentUserData) return;
-  showToast('Nama acak ulang segera hadir! 🎲');
-}
-
-function showAbout() {
-  alert('Veil v1.0.0\nPlatform komunitas anonim\nDibuat dengan 💜\n\nSemua identitas disembunyikan.\nAnda memegang kontrol.');
-}
-
-function showNotifSettings() {
-  showToast('Pengaturan notifikasi disimpan!');
-}
-
-// ─── Admin tabs ───
-function switchAdminTab(tab) {
-  document.getElementById('admin-reports').style.display = tab === 'reports' ? 'block' : 'none';
-  document.getElementById('admin-users').style.display = tab === 'users' ? 'block' : 'none';
-  document.getElementById('atab-reports').classList.toggle('active', tab === 'reports');
-  document.getElementById('atab-users').classList.toggle('active', tab === 'users');
-}
-
-// ─── Chat random (simulasi + WebRTC ready) ───
+// ─── Variabel global chat & call ───
 let searchTimer, callTimerInterval, callSeconds = 0;
-
-function startSearching(type) {
-  const overlay = document.getElementById('searching-overlay');
-  document.getElementById('searching-text').textContent = type === 'call' ? 'Mencari lawan bicara...' : 'Mencari teman chat...';
-  overlay.style.display = 'flex';
-  const delay = 1800 + Math.random() * 1400;
-  searchTimer = setTimeout(() => {
-    overlay.style.display = 'none';
-    if (type === 'call') startCall();
-    else openChatRoom();
-  }, delay);
-}
 
 function cancelSearch() {
   clearTimeout(searchTimer);
@@ -1501,7 +1466,7 @@ function handleChatKey(e) {
 // ══════════════════════════════════════════════
 //  REAL VOICE CALL — WebRTC + Firebase Signaling
 // ══════════════════════════════════════════════
-let localStream = null, peerConnection = null, callTimerInterval, callSeconds = 0;
+let localStream = null, peerConnection = null;
 const ICE_SERVERS = { iceServers: [{ urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }] };
 
 async function startRealCall() {
