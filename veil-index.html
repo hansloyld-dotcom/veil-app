@@ -1,0 +1,1387 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Veil — Anonim, Bebas, Nyata</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet" />
+
+  <!-- Firebase SDK -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile }
+      from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+    import { getFirestore, collection, doc, addDoc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, query, orderBy, onSnapshot, serverTimestamp, limit, where, increment }
+      from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    import { getStorage, ref, uploadBytes, getDownloadURL }
+      from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
+
+    // ═══════════════════════════════════════════════════
+    // ⚙️  GANTI DENGAN KONFIGURASI FIREBASE KAMU
+    // ═══════════════════════════════════════════════════
+    const firebaseConfig = {
+      apiKey: "AIzaSyDp6kSEL6nhvi-H0CI8ocjCFRz3qiHnU9c",
+      authDomain: "AIzaSyDp6kSEL6nhvi-H0CI8ocjCFRz3qiHnU9c",
+      projectId: "veil-app-d7cf8",
+      storageBucket:  "veil-app-d7cf8.firebasestorage.app",
+      messagingSenderId: "811790397897",
+      appId: "1:811790397897:web:71bd7b2e2e8b85bc037818"
+    };
+
+    // ═══════════════════════════════════════════════════
+    // 👑 EMAIL ADMIN (EMAIL KAMU SENDIRI)
+    // ═══════════════════════════════════════════════════
+    const ADMIN_EMAIL = "hansloyld@gmail.com"; // GANTI INI
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const storage = getStorage(app);
+
+    // ─── Device Fingerprint (untuk ban device) ───
+    function getDeviceId() {
+      let id = localStorage.getItem('veil_device_id');
+      if (!id) {
+        id = 'dev_' + Math.random().toString(36).substr(2,9) + '_' + Date.now().toString(36);
+        localStorage.setItem('veil_device_id', id);
+      }
+      return id;
+    }
+    const DEVICE_ID = getDeviceId();
+
+    // ─── State Global ───
+    let currentUser = null;
+    let currentUserData = null;
+    let unsubFeed = null;
+
+    // Emoji pool untuk nama anonim
+    const EMOJIS = ['🌙','🦋','🌊','⚡','🌸','🔮','🦊','🌺','❄️','🎭','🌿','⭐','🎵','🌈','🦅','🌙','🍃','💎','🌻','🔥'];
+    const ADJECTIVES = ['gelap','tenang','merah','biru','diam','liar','malam','fajar','hujan','angin','sunyi','jauh'];
+    const NOUNS = ['bayangan','ombak','kilat','bunga','kristal','kabut','bintang','langit','rimba','lautan'];
+
+    function generateAnonName() {
+      const adj = ADJECTIVES[Math.floor(Math.random()*ADJECTIVES.length)];
+      const noun = NOUNS[Math.floor(Math.random()*NOUNS.length)];
+      const num = Math.floor(Math.random()*9999);
+      return `${noun}_${adj}`;
+    }
+
+    function generateAnonEmoji() {
+      return EMOJIS[Math.floor(Math.random()*EMOJIS.length)];
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  AUTH
+    // ══════════════════════════════════════════════════════
+    window.registerUser = async function(email, password) {
+      try {
+        showLoading('Membuat akun...');
+
+        // Cek apakah device di-ban
+        const devBanRef = doc(db, 'banned_devices', DEVICE_ID);
+        const devBanSnap = await getDoc(devBanRef);
+        if (devBanSnap.exists()) {
+          hideLoading();
+          showToast('❌ Perangkat ini telah diblokir dari Veil');
+          return;
+        }
+
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        const uid = cred.user.uid;
+        const anonName = generateAnonName();
+        const anonEmoji = generateAnonEmoji();
+
+        const isAdmin = email === ADMIN_EMAIL;
+        const role = isAdmin ? 'admin' : 'user';
+
+        await setDoc(doc(db, 'users', uid), {
+          uid,
+          email,
+          anonName,
+          anonEmoji,
+          role,
+          deviceId: DEVICE_ID,
+          createdAt: serverTimestamp(),
+          banned: false,
+          postCount: 0,
+          followerCount: 0
+        });
+
+        hideLoading();
+        showToast(`✅ Selamat datang, ${anonEmoji} ${anonName}!`);
+        switchScreen('feed');
+      } catch(e) {
+        hideLoading();
+        showToast('❌ ' + friendlyError(e.code));
+      }
+    };
+
+    window.loginUser = async function(email, password) {
+      try {
+        showLoading('Masuk...');
+        const cred = await signInWithEmailAndPassword(auth, email, password);
+        const uid = cred.user.uid;
+
+        // Cek ban user
+        const userSnap = await getDoc(doc(db, 'users', uid));
+        if (userSnap.exists() && userSnap.data().banned) {
+          await signOut(auth);
+          hideLoading();
+          showToast('❌ Akun ini telah diblokir permanen');
+          return;
+        }
+
+        // Cek ban device
+        const devBanSnap = await getDoc(doc(db, 'banned_devices', DEVICE_ID));
+        if (devBanSnap.exists()) {
+          await signOut(auth);
+          hideLoading();
+          showToast('❌ Perangkat ini telah diblokir dari Veil');
+          return;
+        }
+
+        // Update device ID terbaru
+        await updateDoc(doc(db, 'users', uid), { deviceId: DEVICE_ID });
+
+        hideLoading();
+      } catch(e) {
+        hideLoading();
+        showToast('❌ ' + friendlyError(e.code));
+      }
+    };
+
+    window.logoutUser = async function() {
+      await signOut(auth);
+      switchScreen('auth');
+      showToast('Sampai jumpa! 👋');
+    };
+
+    function friendlyError(code) {
+      const map = {
+        'auth/email-already-in-use': 'Email sudah terdaftar',
+        'auth/wrong-password': 'Password salah',
+        'auth/user-not-found': 'Email tidak ditemukan',
+        'auth/weak-password': 'Password minimal 6 karakter',
+        'auth/invalid-email': 'Format email tidak valid',
+        'auth/invalid-credential': 'Email atau password salah',
+      };
+      return map[code] || 'Terjadi kesalahan, coba lagi';
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  AUTH STATE LISTENER
+    // ══════════════════════════════════════════════════════
+    onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        currentUser = user;
+        const snap = await getDoc(doc(db, 'users', user.uid));
+        if (snap.exists()) {
+          currentUserData = snap.data();
+          window.currentUserData = currentUserData;
+
+          // Update UI profil
+          document.getElementById('profile-emoji').textContent = currentUserData.anonEmoji;
+          document.getElementById('profile-name').textContent = currentUserData.anonName;
+          document.getElementById('profile-handle').textContent = '@' + currentUserData.uid.substr(0,8);
+          document.getElementById('profile-role-badge').textContent =
+            currentUserData.role === 'admin' ? '👑 Developer / Admin' :
+            currentUserData.role === 'moderator' ? '🛡️ Moderator' : '🎭 Anonim';
+
+          // Tampilkan admin panel jika admin
+          if (currentUserData.role === 'admin' || currentUserData.role === 'moderator') {
+            document.getElementById('admin-nav-item').style.display = 'flex';
+          }
+
+          // Load feed
+          loadFeed();
+          loadProfilePosts();
+          switchScreen('feed');
+        }
+      } else {
+        currentUser = null;
+        currentUserData = null;
+        window.currentUserData = null;
+        if (unsubFeed) unsubFeed();
+        switchScreen('auth');
+      }
+    });
+
+    // ══════════════════════════════════════════════════════
+    //  POSTS - CREATE
+    // ══════════════════════════════════════════════════════
+    window.submitPost = async function() {
+      if (!currentUser || !currentUserData) return showToast('Login dulu!');
+      const caption = document.getElementById('compose-text').value.trim();
+      const fileInput = document.getElementById('compose-image-input');
+      const file = fileInput.files[0];
+
+      if (!caption && !file) return showToast('Tulis sesuatu atau pilih gambar!');
+      showLoading('Mengunggah postingan...');
+
+      try {
+        let imageUrl = null;
+        if (file) {
+          const storageRef = ref(storage, `posts/${currentUser.uid}/${Date.now()}_${file.name}`);
+          await uploadBytes(storageRef, file);
+          imageUrl = await getDownloadURL(storageRef);
+        }
+
+        await addDoc(collection(db, 'posts'), {
+          uid: currentUser.uid,
+          anonName: currentUserData.anonName,
+          anonEmoji: currentUserData.anonEmoji,
+          caption,
+          imageUrl,
+          likeCount: 0,
+          commentCount: 0,
+          reportCount: 0,
+          likedBy: [],
+          createdAt: serverTimestamp(),
+          deleted: false
+        });
+
+        await updateDoc(doc(db, 'users', currentUser.uid), { postCount: increment(1) });
+
+        document.getElementById('compose-text').value = '';
+        fileInput.value = '';
+        document.getElementById('compose-preview').style.display = 'none';
+        closeModal('compose-modal');
+        hideLoading();
+        showToast('✅ Postingan berhasil dikirim!');
+      } catch(e) {
+        hideLoading();
+        showToast('❌ Gagal upload: ' + e.message);
+      }
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  POSTS - READ (REALTIME)
+    // ══════════════════════════════════════════════════════
+    function loadFeed() {
+      const q = query(collection(db, 'posts'), where('deleted','==',false), orderBy('createdAt','desc'), limit(30));
+      unsubFeed = onSnapshot(q, (snap) => {
+        const container = document.getElementById('feed-container');
+        container.innerHTML = '';
+        if (snap.empty) {
+          container.innerHTML = '<div style="text-align:center;padding:60px 20px;color:var(--muted);">Belum ada postingan. Jadilah yang pertama! ✨</div>';
+          return;
+        }
+        snap.forEach(docSnap => {
+          const post = { id: docSnap.id, ...docSnap.data() };
+          container.appendChild(createPostCard(post));
+        });
+      });
+    }
+
+    function createPostCard(post) {
+      const isAdmin = currentUserData && (currentUserData.role === 'admin' || currentUserData.role === 'moderator');
+      const isOwn = currentUser && post.uid === currentUser.uid;
+      const isLiked = currentUser && post.likedBy && post.likedBy.includes(currentUser.uid);
+      const timeAgo = formatTime(post.createdAt);
+
+      const card = document.createElement('div');
+      card.className = 'post-card';
+      card.id = 'post-' + post.id;
+      card.innerHTML = `
+        <div class="post-header">
+          <div class="post-avatar" style="background:linear-gradient(135deg,var(--accent),var(--accent2))">${post.anonEmoji || '🎭'}</div>
+          <div class="post-meta">
+            <div class="post-username">${post.anonName}</div>
+            <div class="post-time">${timeAgo} · anonim</div>
+          </div>
+          <div class="post-more" onclick="togglePostMenu('${post.id}','${post.uid}')">⋯</div>
+        </div>
+        <div id="post-menu-${post.id}" class="post-menu" style="display:none;">
+          ${isAdmin ? `<div class="menu-item danger" onclick="deletePost('${post.id}')">🗑️ Hapus Postingan</div>` : ''}
+          ${isAdmin ? `<div class="menu-item danger" onclick="confirmBanUser('${post.uid}','${post.id}')">🔨 Ban User</div>` : ''}
+          ${!isOwn ? `<div class="menu-item" onclick="reportPost('${post.id}','${post.anonName}')">🚩 Laporkan</div>` : ''}
+          ${isOwn ? `<div class="menu-item danger" onclick="deletePost('${post.id}')">🗑️ Hapus Postingan</div>` : ''}
+          <div class="menu-item" onclick="togglePostMenu('${post.id}','${post.uid}')">✕ Tutup</div>
+        </div>
+        ${post.imageUrl ? `<img src="${post.imageUrl}" class="post-image-real" alt="post image" loading="lazy" />` : ''}
+        ${post.caption ? `<div class="post-body"><div class="post-caption">${escHtml(post.caption)}</div></div>` : ''}
+        <div class="post-actions">
+          <button class="action-btn ${isLiked?'liked':''}" id="like-btn-${post.id}" onclick="toggleLike('${post.id}')">
+            <span class="icon">${isLiked?'❤️':'🤍'}</span>
+            <span class="count" id="like-count-${post.id}">${post.likeCount||0}</span>
+          </button>
+          <button class="action-btn" onclick="openComments('${post.id}')">
+            <span class="icon">💬</span>
+            <span id="comment-count-${post.id}">${post.commentCount||0}</span>
+          </button>
+          <button class="action-btn share-btn" onclick="sharePost('${post.id}')">
+            <span class="icon">↗</span>
+          </button>
+        </div>
+      `;
+      return card;
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  LIKE
+    // ══════════════════════════════════════════════════════
+    window.toggleLike = async function(postId) {
+      if (!currentUser) return showToast('Login dulu untuk like!');
+      const postRef = doc(db, 'posts', postId);
+      const postSnap = await getDoc(postRef);
+      if (!postSnap.exists()) return;
+      const data = postSnap.data();
+      const likedBy = data.likedBy || [];
+      const uid = currentUser.uid;
+      const btn = document.getElementById('like-btn-' + postId);
+      const countEl = document.getElementById('like-count-' + postId);
+
+      if (likedBy.includes(uid)) {
+        // Unlike
+        const newLikedBy = likedBy.filter(x => x !== uid);
+        await updateDoc(postRef, { likedBy: newLikedBy, likeCount: Math.max(0, (data.likeCount||0)-1) });
+        btn.classList.remove('liked');
+        btn.querySelector('.icon').textContent = '🤍';
+        countEl.textContent = Math.max(0, parseInt(countEl.textContent)-1);
+      } else {
+        // Like
+        likedBy.push(uid);
+        await updateDoc(postRef, { likedBy, likeCount: (data.likeCount||0)+1 });
+        btn.classList.add('liked');
+        btn.querySelector('.icon').textContent = '❤️';
+        countEl.textContent = parseInt(countEl.textContent)+1;
+      }
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  REPORT
+    // ══════════════════════════════════════════════════════
+    window.reportPost = async function(postId, anonName) {
+      if (!currentUser) return showToast('Login dulu!');
+      const reason = prompt(`Laporkan postingan dari ${anonName}?\nAlasan laporan:`);
+      if (!reason) return;
+      showLoading('Mengirim laporan...');
+      try {
+        const postRef = doc(db, 'posts', postId);
+        await updateDoc(postRef, { reportCount: increment(1) });
+        await addDoc(collection(db, 'reports'), {
+          postId,
+          reportedAnonName: anonName,
+          reason,
+          reportedBy: currentUser.uid,
+          reporterAnonName: currentUserData.anonName,
+          status: 'pending',
+          createdAt: serverTimestamp()
+        });
+        hideLoading();
+        showToast('✅ Laporan terkirim ke admin. Terima kasih!');
+      } catch(e) {
+        hideLoading();
+        showToast('❌ Gagal mengirim laporan');
+      }
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  DELETE POST
+    // ══════════════════════════════════════════════════════
+    window.deletePost = async function(postId) {
+      if (!confirm('Hapus postingan ini?')) return;
+      await updateDoc(doc(db, 'posts', postId), { deleted: true });
+      document.getElementById('post-' + postId)?.remove();
+      showToast('🗑️ Postingan dihapus');
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  BAN USER (Admin only) — Ban akun + ban device
+    // ══════════════════════════════════════════════════════
+    window.confirmBanUser = async function(uid, postId) {
+      if (!currentUserData || currentUserData.role === 'user') return;
+      const reason = prompt('Alasan ban pengguna ini?');
+      if (!reason) return;
+      await banUser(uid, reason);
+    };
+
+    window.banUser = async function(uid, reason) {
+      if (!currentUserData || currentUserData.role === 'user') return showToast('Akses ditolak!');
+      showLoading('Memblokir pengguna...');
+      try {
+        const userRef = doc(db, 'users', uid);
+        const userSnap = await getDoc(userRef);
+        if (!userSnap.exists()) return showToast('User tidak ditemukan');
+        const userData = userSnap.data();
+
+        if (userData.role === 'admin') return showToast('❌ Tidak bisa ban admin!');
+
+        // Ban akun
+        await updateDoc(userRef, { banned: true, banReason: reason, bannedAt: serverTimestamp() });
+
+        // Ban device
+        if (userData.deviceId) {
+          await setDoc(doc(db, 'banned_devices', userData.deviceId), {
+            uid,
+            anonName: userData.anonName,
+            reason,
+            bannedAt: serverTimestamp(),
+            bannedBy: currentUser.uid
+          });
+        }
+
+        // Log ban
+        await addDoc(collection(db, 'ban_logs'), {
+          targetUid: uid,
+          targetAnonName: userData.anonName,
+          targetDeviceId: userData.deviceId,
+          reason,
+          bannedBy: currentUser.uid,
+          bannedByName: currentUserData.anonName,
+          createdAt: serverTimestamp()
+        });
+
+        hideLoading();
+        showToast(`🔨 Pengguna ${userData.anonName} telah diblokir permanen (akun + device)`);
+        loadAdminPanel();
+      } catch(e) {
+        hideLoading();
+        showToast('❌ Gagal ban: ' + e.message);
+      }
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  UNBAN
+    // ══════════════════════════════════════════════════════
+    window.unbanUser = async function(uid) {
+      if (!currentUserData || currentUserData.role !== 'admin') return;
+      const userSnap = await getDoc(doc(db, 'users', uid));
+      if (!userSnap.exists()) return;
+      const userData = userSnap.data();
+      await updateDoc(doc(db, 'users', uid), { banned: false, banReason: null });
+      if (userData.deviceId) {
+        await deleteDoc(doc(db, 'banned_devices', userData.deviceId));
+      }
+      showToast(`✅ ${userData.anonName} telah diunban`);
+      loadAdminPanel();
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  PROMOTE MODERATOR
+    // ══════════════════════════════════════════════════════
+    window.promoteToMod = async function(uid) {
+      if (!currentUserData || currentUserData.role !== 'admin') return showToast('Hanya admin!');
+      await updateDoc(doc(db, 'users', uid), { role: 'moderator' });
+      showToast('🛡️ User dipromosikan jadi Moderator!');
+      loadAdminPanel();
+    };
+
+    window.demoteFromMod = async function(uid) {
+      if (!currentUserData || currentUserData.role !== 'admin') return showToast('Hanya admin!');
+      await updateDoc(doc(db, 'users', uid), { role: 'user' });
+      showToast('Moderator diturunkan jadi user biasa');
+      loadAdminPanel();
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  ADMIN PANEL
+    // ══════════════════════════════════════════════════════
+    window.loadAdminPanel = async function() {
+      if (!currentUserData || (currentUserData.role !== 'admin' && currentUserData.role !== 'moderator')) return;
+
+      // Load reports
+      const reportsSnap = await getDocs(query(collection(db, 'reports'), where('status','==','pending'), orderBy('createdAt','desc')));
+      const reportsDiv = document.getElementById('admin-reports');
+      reportsDiv.innerHTML = '';
+      if (reportsSnap.empty) {
+        reportsDiv.innerHTML = '<div class="empty-state">✅ Tidak ada laporan pending</div>';
+      } else {
+        reportsSnap.forEach(d => {
+          const r = { id: d.id, ...d.data() };
+          reportsDiv.innerHTML += `
+            <div class="admin-card">
+              <div class="admin-card-header">
+                <span class="badge-danger">🚩 Laporan</span>
+                <span style="color:var(--muted);font-size:12px">${formatTime(r.createdAt)}</span>
+              </div>
+              <div style="margin:8px 0">
+                <div style="font-size:13px;color:var(--muted)">Postingan oleh: <strong style="color:var(--text)">${r.reportedAnonName}</strong></div>
+                <div style="font-size:13px;margin-top:4px">Alasan: <em>${escHtml(r.reason)}</em></div>
+              </div>
+              <div style="display:flex;gap:8px;margin-top:10px">
+                <button class="admin-btn danger" onclick="deletePost('${r.postId}');resolveReport('${r.id}')">🗑️ Hapus Post</button>
+                <button class="admin-btn" onclick="resolveReport('${r.id}')">✅ Abaikan</button>
+              </div>
+            </div>`;
+        });
+      }
+
+      // Load users
+      const usersSnap = await getDocs(query(collection(db, 'users'), orderBy('createdAt','desc')));
+      const usersDiv = document.getElementById('admin-users');
+      usersDiv.innerHTML = '';
+      usersSnap.forEach(d => {
+        const u = { id: d.id, ...d.data() };
+        const roleLabel = u.role === 'admin' ? '👑' : u.role === 'moderator' ? '🛡️' : '👤';
+        usersDiv.innerHTML += `
+          <div class="admin-card">
+            <div class="admin-card-header">
+              <span>${roleLabel} ${u.anonEmoji||'🎭'} <strong>${u.anonName}</strong></span>
+              ${u.banned ? '<span class="badge-danger">BANNED</span>' : '<span class="badge-ok">Aktif</span>'}
+            </div>
+            <div style="font-size:12px;color:var(--muted);margin-top:4px">${u.email} · Post: ${u.postCount||0}</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+              ${u.role !== 'admin' && !u.banned ? `<button class="admin-btn danger" onclick="banUser('${u.uid}','Ban dari admin panel')">🔨 Ban</button>` : ''}
+              ${u.banned ? `<button class="admin-btn" onclick="unbanUser('${u.uid}')">✅ Unban</button>` : ''}
+              ${u.role === 'user' && currentUserData.role === 'admin' ? `<button class="admin-btn mod" onclick="promoteToMod('${u.uid}')">🛡️ Jadikan Mod</button>` : ''}
+              ${u.role === 'moderator' && currentUserData.role === 'admin' ? `<button class="admin-btn" onclick="demoteFromMod('${u.uid}')">↓ Turunkan</button>` : ''}
+            </div>
+          </div>`;
+      });
+    };
+
+    window.resolveReport = async function(reportId) {
+      await updateDoc(doc(db, 'reports', reportId), { status: 'resolved' });
+      loadAdminPanel();
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  COMMENTS
+    // ══════════════════════════════════════════════════════
+    let currentPostIdForComments = null;
+
+    window.openComments = async function(postId) {
+      if (!currentUser) return showToast('Login dulu untuk komentar!');
+      currentPostIdForComments = postId;
+      const modal = document.getElementById('comments-modal');
+      modal.classList.add('active');
+      document.getElementById('comments-list').innerHTML = '<div style="text-align:center;padding:20px;color:var(--muted)">Memuat komentar...</div>';
+
+      const q = query(collection(db, 'posts', postId, 'comments'), orderBy('createdAt','asc'));
+      const snap = await getDocs(q);
+      const list = document.getElementById('comments-list');
+      list.innerHTML = '';
+      if (snap.empty) {
+        list.innerHTML = '<div style="text-align:center;padding:20px;color:var(--muted)">Belum ada komentar. Jadilah yang pertama! 💬</div>';
+        return;
+      }
+      snap.forEach(d => {
+        const c = d.data();
+        list.innerHTML += `
+          <div class="comment-item">
+            <span class="comment-avatar">${c.anonEmoji||'🎭'}</span>
+            <div class="comment-body">
+              <div class="comment-name">${c.anonName}</div>
+              <div class="comment-text">${escHtml(c.text)}</div>
+              <div class="comment-time">${formatTime(c.createdAt)}</div>
+            </div>
+          </div>`;
+      });
+      list.scrollTop = list.scrollHeight;
+    };
+
+    window.submitComment = async function() {
+      if (!currentUser || !currentPostIdForComments) return;
+      const input = document.getElementById('comment-input');
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      try {
+        await addDoc(collection(db, 'posts', currentPostIdForComments, 'comments'), {
+          text,
+          uid: currentUser.uid,
+          anonName: currentUserData.anonName,
+          anonEmoji: currentUserData.anonEmoji,
+          createdAt: serverTimestamp()
+        });
+        await updateDoc(doc(db, 'posts', currentPostIdForComments), { commentCount: increment(1) });
+        openComments(currentPostIdForComments);
+      } catch(e) {
+        showToast('❌ Gagal kirim komentar');
+      }
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  PROFIL
+    // ══════════════════════════════════════════════════════
+    window.loadProfilePosts = async function() {
+      if (!currentUser) return;
+      const q = query(collection(db, 'posts'), where('uid','==',currentUser.uid), where('deleted','==',false), orderBy('createdAt','desc'));
+      const snap = await getDocs(q);
+      const grid = document.getElementById('profile-grid');
+      grid.innerHTML = '';
+      const profileCountEl = document.getElementById('profile-post-count');
+      if (profileCountEl) profileCountEl.textContent = snap.size;
+      snap.forEach(d => {
+        const post = d.data();
+        const div = document.createElement('div');
+        div.className = 'grid-post';
+        if (post.imageUrl) {
+          div.style.backgroundImage = `url(${post.imageUrl})`;
+          div.style.backgroundSize = 'cover';
+          div.style.backgroundPosition = 'center';
+        } else {
+          div.style.background = 'linear-gradient(135deg,var(--surface2),var(--surface))';
+          div.innerHTML = `<span style="font-size:11px;padding:8px;text-align:center;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical">${escHtml(post.caption||'').substr(0,60)}</span>`;
+        }
+        div.onclick = () => openComments(d.id);
+        grid.appendChild(div);
+      });
+      if (snap.empty) {
+        grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--muted)">Belum ada postingan</div>';
+      }
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  SHARE
+    // ══════════════════════════════════════════════════════
+    window.sharePost = function(postId) {
+      const url = window.location.origin + '?post=' + postId;
+      if (navigator.share) {
+        navigator.share({ title: 'Veil', text: 'Lihat postingan anonim ini di Veil!', url });
+      } else {
+        navigator.clipboard.writeText(url);
+        showToast('🔗 Link disalin!');
+      }
+    };
+
+    // ══════════════════════════════════════════════════════
+    //  UTILS
+    // ══════════════════════════════════════════════════════
+    function formatTime(ts) {
+      if (!ts) return 'baru saja';
+      const date = ts.toDate ? ts.toDate() : new Date(ts);
+      const diff = (Date.now() - date.getTime()) / 1000;
+      if (diff < 60) return 'baru saja';
+      if (diff < 3600) return Math.floor(diff/60) + ' menit lalu';
+      if (diff < 86400) return Math.floor(diff/3600) + ' jam lalu';
+      return Math.floor(diff/86400) + ' hari lalu';
+    }
+
+    function escHtml(str) {
+      return (str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+    }
+
+    // Make functions available globally
+    window.db = db;
+    window.storage = storage;
+    window.auth = auth;
+    window.currentUser = () => currentUser;
+    window.currentUserData = currentUserData;
+    window.formatTime = formatTime;
+  </script>
+
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --surface: #111118;
+      --surface2: #1a1a24;
+      --border: rgba(255,255,255,0.07);
+      --accent: #7c6cfc;
+      --accent2: #fc6c8f;
+      --accent3: #6cfcca;
+      --text: #f0eeff;
+      --muted: #6b6880;
+      --danger: #fc4f6c;
+      --card-radius: 20px;
+    }
+
+    * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    body { font-family:'DM Sans',sans-serif; background:var(--bg); color:var(--text); min-height:100dvh; overflow-x:hidden; padding-bottom:80px; }
+    body::before { content:''; position:fixed; inset:0; background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E"); pointer-events:none; z-index:9999; opacity:0.35; }
+
+    .screen { display:none; flex-direction:column; min-height:100dvh; animation:fadeUp 0.3s ease; }
+    .screen.active { display:flex; }
+    @keyframes fadeUp { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:translateY(0)} }
+
+    /* ─── TOPBAR ─── */
+    .topbar { position:sticky; top:0; z-index:100; padding:14px 20px 10px; background:linear-gradient(to bottom,var(--bg) 70%,transparent); display:flex; align-items:center; justify-content:space-between; }
+    .logo { font-family:'Syne',sans-serif; font-weight:800; font-size:24px; letter-spacing:-1px; background:linear-gradient(135deg,var(--accent),var(--accent2)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+    .topbar-actions { display:flex; gap:8px; }
+    .icon-btn { width:36px; height:36px; border-radius:50%; border:1px solid var(--border); background:var(--surface); display:flex; align-items:center; justify-content:center; cursor:pointer; transition:all 0.2s; font-size:15px; }
+    .icon-btn:active { transform:scale(0.9); }
+
+    /* ─── BOTTOM NAV ─── */
+    .bottom-nav { position:fixed; bottom:0; left:0; right:0; height:70px; background:rgba(10,10,15,0.9); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px); border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-around; z-index:200; padding-bottom:env(safe-area-inset-bottom); }
+    .nav-item { display:flex; flex-direction:column; align-items:center; gap:3px; padding:6px 14px; cursor:pointer; border-radius:12px; min-width:50px; transition:all 0.2s; }
+    .nav-item:active { background:var(--surface); }
+    .nav-item .nav-icon { font-size:20px; transition:transform 0.2s; }
+    .nav-item .nav-label { font-size:10px; font-weight:500; color:var(--muted); transition:color 0.2s; }
+    .nav-item.active .nav-label { color:var(--accent); }
+    .nav-item.active .nav-icon { transform:scale(1.15); }
+
+    /* ─── FEED ─── */
+    .feed { padding:0 14px; display:flex; flex-direction:column; gap:14px; padding-bottom:20px; }
+    .post-card { background:var(--surface); border-radius:var(--card-radius); border:1px solid var(--border); overflow:hidden; }
+    .post-header { display:flex; align-items:center; gap:10px; padding:12px 14px 8px; }
+    .post-avatar { width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:16px; flex-shrink:0; }
+    .post-meta { flex:1; }
+    .post-username { font-family:'Syne',sans-serif; font-size:13px; font-weight:600; }
+    .post-time { font-size:11px; color:var(--muted); }
+    .post-more { font-size:20px; color:var(--muted); cursor:pointer; padding:4px 8px; border-radius:8px; transition:background 0.2s; }
+    .post-more:active { background:var(--surface2); }
+    .post-image-real { width:100%; max-height:500px; object-fit:cover; display:block; }
+    .post-body { padding:10px 14px 4px; }
+    .post-caption { font-size:14px; line-height:1.6; word-break:break-word; }
+    .post-actions { display:flex; gap:10px; padding:8px 14px 12px; align-items:center; }
+    .action-btn { display:flex; align-items:center; gap:5px; background:none; border:none; color:var(--muted); font-family:'DM Sans',sans-serif; font-size:13px; cursor:pointer; transition:all 0.2s; padding:6px 10px; border-radius:20px; }
+    .action-btn:active { background:var(--surface2); }
+    .action-btn.liked { color:var(--accent2); }
+    .action-btn .icon { font-size:17px; }
+    .action-btn.share-btn { margin-left:auto; }
+
+    /* ─── POST MENU ─── */
+    .post-menu { background:var(--surface2); border-top:1px solid var(--border); }
+    .menu-item { padding:12px 16px; cursor:pointer; font-size:13px; transition:background 0.15s; display:flex; align-items:center; gap:8px; }
+    .menu-item:active { background:var(--border); }
+    .menu-item.danger { color:var(--danger); }
+
+    /* ─── FAB ─── */
+    .fab { position:fixed; bottom:86px; right:18px; width:50px; height:50px; border-radius:50%; background:linear-gradient(135deg,var(--accent),var(--accent2)); display:flex; align-items:center; justify-content:center; font-size:20px; cursor:pointer; box-shadow:0 6px 28px rgba(124,108,252,0.4); transition:all 0.2s; z-index:150; border:none; color:white; }
+    .fab:active { transform:scale(0.9); }
+
+    /* ─── AUTH ─── */
+    .auth-screen { background:radial-gradient(circle at 50% 20%, #1a1040, var(--bg) 60%); min-height:100dvh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:40px 28px; }
+    .auth-logo { font-family:'Syne',sans-serif; font-weight:800; font-size:48px; background:linear-gradient(135deg,var(--accent),var(--accent2)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; margin-bottom:8px; }
+    .auth-tagline { color:var(--muted); font-size:14px; margin-bottom:40px; text-align:center; }
+    .auth-tabs { display:flex; background:var(--surface); border-radius:14px; padding:4px; margin-bottom:24px; width:100%; max-width:320px; }
+    .auth-tab { flex:1; padding:10px; text-align:center; border-radius:10px; cursor:pointer; font-size:13px; font-weight:500; color:var(--muted); transition:all 0.2s; }
+    .auth-tab.active { background:var(--surface2); color:var(--text); }
+    .auth-form { width:100%; max-width:320px; display:flex; flex-direction:column; gap:12px; }
+    .auth-input { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:14px 16px; color:var(--text); font-family:'DM Sans',sans-serif; font-size:14px; outline:none; transition:border-color 0.2s; width:100%; }
+    .auth-input:focus { border-color:var(--accent); }
+    .auth-input::placeholder { color:var(--muted); }
+    .auth-note { font-size:11px; color:var(--muted); text-align:center; line-height:1.5; margin-top:4px; }
+
+    /* ─── BIG BTN ─── */
+    .big-btn { width:100%; padding:16px; border-radius:14px; border:none; cursor:pointer; font-family:'Syne',sans-serif; font-size:15px; font-weight:700; letter-spacing:0.3px; transition:all 0.2s; }
+    .big-btn:active { transform:scale(0.97); }
+    .big-btn.primary { background:linear-gradient(135deg,var(--accent),var(--accent2)); color:white; box-shadow:0 6px 20px rgba(124,108,252,0.3); }
+    .big-btn.secondary { background:var(--surface); color:var(--text); border:1px solid var(--border); }
+
+    /* ─── MODAL / SHEET ─── */
+    .modal-overlay { position:fixed; inset:0; z-index:400; background:rgba(0,0,0,0.75); backdrop-filter:blur(10px); display:none; align-items:flex-end; }
+    .modal-overlay.active { display:flex; }
+    .modal-sheet { width:100%; background:var(--surface); border-radius:24px 24px 0 0; padding:12px 20px 40px; animation:slideUp 0.3s cubic-bezier(0.34,1.2,0.64,1); max-height:90dvh; overflow-y:auto; }
+    @keyframes slideUp { from{transform:translateY(100%)} to{transform:translateY(0)} }
+    .modal-handle { width:36px; height:4px; border-radius:4px; background:var(--muted); margin:0 auto 18px; opacity:0.3; }
+    .modal-title { font-family:'Syne',sans-serif; font-size:19px; font-weight:700; margin-bottom:14px; }
+
+    /* ─── COMPOSE ─── */
+    .compose-textarea { width:100%; background:var(--surface2); border:1px solid var(--border); border-radius:14px; padding:12px 14px; color:var(--text); font-family:'DM Sans',sans-serif; font-size:14px; outline:none; resize:none; min-height:100px; transition:border-color 0.2s; }
+    .compose-textarea:focus { border-color:var(--accent); }
+    .compose-textarea::placeholder { color:var(--muted); }
+    .compose-tools { display:flex; gap:8px; padding:10px 0; flex-wrap:wrap; }
+    .compose-tool { padding:6px 12px; border-radius:20px; background:var(--surface2); border:1px solid var(--border); font-size:12px; cursor:pointer; transition:all 0.2s; display:flex; align-items:center; gap:5px; }
+    .compose-tool:active { background:var(--accent); color:white; }
+    .compose-image-preview { width:100%; border-radius:12px; object-fit:cover; max-height:200px; margin-bottom:8px; }
+
+    /* ─── COMMENTS ─── */
+    .comments-list { display:flex; flex-direction:column; gap:12px; max-height:55dvh; overflow-y:auto; padding-bottom:8px; }
+    .comment-item { display:flex; gap:10px; align-items:flex-start; }
+    .comment-avatar { font-size:24px; flex-shrink:0; }
+    .comment-body { background:var(--surface2); border-radius:14px; padding:10px 12px; flex:1; }
+    .comment-name { font-family:'Syne',sans-serif; font-size:12px; font-weight:600; margin-bottom:4px; }
+    .comment-text { font-size:13px; line-height:1.5; word-break:break-word; }
+    .comment-time { font-size:11px; color:var(--muted); margin-top:4px; }
+    .comment-input-row { display:flex; gap:8px; margin-top:14px; padding-top:14px; border-top:1px solid var(--border); }
+    .comment-input { flex:1; background:var(--surface2); border:1px solid var(--border); border-radius:20px; padding:10px 14px; color:var(--text); font-family:'DM Sans',sans-serif; font-size:13px; outline:none; }
+    .comment-input:focus { border-color:var(--accent); }
+    .comment-input::placeholder { color:var(--muted); }
+    .comment-send-btn { width:38px; height:38px; border-radius:50%; background:linear-gradient(135deg,var(--accent),var(--accent2)); border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:15px; flex-shrink:0; }
+    .comment-send-btn:active { transform:scale(0.9); }
+
+    /* ─── CHAT RANDOM ─── */
+    .match-zone { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px; padding:40px 24px; }
+    .match-orb { width:130px; height:130px; border-radius:50%; background:radial-gradient(circle at 40% 40%,var(--accent),var(--accent2) 70%); display:flex; align-items:center; justify-content:center; font-size:48px; box-shadow:0 0 60px rgba(124,108,252,0.4); animation:pulse 3s ease infinite; }
+    @keyframes pulse { 0%,100%{box-shadow:0 0 60px rgba(124,108,252,0.4)} 50%{box-shadow:0 0 90px rgba(124,108,252,0.7)} }
+    .match-title { font-family:'Syne',sans-serif; font-size:26px; font-weight:800; text-align:center; }
+    .match-sub { color:var(--muted); text-align:center; font-size:13px; line-height:1.6; }
+
+    /* ─── CHAT ROOM ─── */
+    .chat-room { display:none; flex-direction:column; height:100dvh; position:fixed; inset:0; z-index:300; background:var(--bg); }
+    .chat-room.active { display:flex; }
+    .chat-topbar { padding:14px 18px; display:flex; align-items:center; gap:10px; border-bottom:1px solid var(--border); }
+    .chat-partner-name { font-family:'Syne',sans-serif; font-size:14px; font-weight:700; }
+    .chat-partner-status { font-size:11px; color:var(--accent3); display:flex; align-items:center; gap:4px; }
+    .status-dot { width:6px; height:6px; border-radius:50%; background:var(--accent3); display:inline-block; animation:blink 1.5s ease infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+    .messages-area { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
+    .msg { max-width:78%; padding:10px 13px; border-radius:16px; font-size:14px; line-height:1.5; animation:msgIn 0.2s ease; }
+    @keyframes msgIn { from{opacity:0;transform:scale(0.96) translateY(4px)} to{opacity:1;transform:none} }
+    .msg.them { background:var(--surface); border:1px solid var(--border); border-bottom-left-radius:4px; align-self:flex-start; }
+    .msg.me { background:linear-gradient(135deg,var(--accent),#9c8cff); color:white; border-bottom-right-radius:4px; align-self:flex-end; }
+    .msg-time { font-size:10px; opacity:0.5; margin-top:3px; }
+    .chat-input-bar { padding:10px 14px; display:flex; gap:8px; align-items:flex-end; border-top:1px solid var(--border); }
+    .chat-input { flex:1; background:var(--surface); border:1px solid var(--border); border-radius:18px; padding:10px 14px; color:var(--text); font-family:'DM Sans',sans-serif; font-size:14px; outline:none; resize:none; max-height:90px; }
+    .chat-input:focus { border-color:var(--accent); }
+    .chat-input::placeholder { color:var(--muted); }
+    .send-btn { width:38px; height:38px; border-radius:50%; background:linear-gradient(135deg,var(--accent),var(--accent2)); border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:15px; flex-shrink:0; transition:all 0.2s; }
+    .send-btn:active { transform:scale(0.9); }
+
+    /* ─── CALL ─── */
+    .call-screen { position:fixed; inset:0; z-index:500; background:radial-gradient(circle at 50% 30%,#1a1030,var(--bg) 70%); display:none; flex-direction:column; align-items:center; justify-content:space-between; padding:60px 32px 48px; }
+    .call-screen.active { display:flex; }
+    .call-avatar { width:110px; height:110px; border-radius:50%; background:linear-gradient(135deg,var(--accent),var(--accent2)); display:flex; align-items:center; justify-content:center; font-size:44px; box-shadow:0 0 80px rgba(124,108,252,0.5); animation:callPulse 2s ease infinite; }
+    @keyframes callPulse { 0%,100%{box-shadow:0 0 80px rgba(124,108,252,0.5)} 50%{box-shadow:0 0 120px rgba(124,108,252,0.8)} }
+    .call-name { font-family:'Syne',sans-serif; font-size:24px; font-weight:800; text-align:center; margin-top:20px; }
+    .call-status { color:var(--muted); font-size:13px; margin-top:6px; }
+    .call-timer { font-size:26px; font-weight:300; letter-spacing:4px; margin-top:4px; }
+    .call-controls { display:flex; gap:22px; align-items:center; }
+    .call-btn { width:56px; height:56px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:22px; cursor:pointer; border:none; transition:all 0.2s; }
+    .call-btn:active { transform:scale(0.92); }
+    .call-btn.mute { background:var(--surface2); color:var(--text); }
+    .call-btn.end { background:#fc4f6c; color:white; width:66px; height:66px; box-shadow:0 6px 20px rgba(252,79,108,0.4); }
+    .call-btn.speaker { background:var(--surface2); color:var(--text); }
+
+    /* ─── PROFILE ─── */
+    .profile-hero { background:linear-gradient(180deg,var(--surface2),transparent); padding:28px 22px 20px; display:flex; flex-direction:column; align-items:center; gap:12px; }
+    .profile-big-avatar { width:80px; height:80px; border-radius:50%; background:linear-gradient(135deg,var(--accent),var(--accent2)); display:flex; align-items:center; justify-content:center; font-size:32px; box-shadow:0 6px 28px rgba(124,108,252,0.4); }
+    .profile-name-text { font-family:'Syne',sans-serif; font-size:20px; font-weight:800; }
+    .profile-handle { color:var(--muted); font-size:12px; }
+    .profile-badge { display:flex; align-items:center; gap:6px; background:rgba(124,108,252,0.12); border:1px solid rgba(124,108,252,0.25); padding:4px 12px; border-radius:20px; font-size:12px; color:var(--accent); }
+    .profile-stats { display:flex; border-top:1px solid var(--border); border-bottom:1px solid var(--border); margin:0 14px; }
+    .stat-item { flex:1; text-align:center; padding:14px 6px; border-right:1px solid var(--border); }
+    .stat-item:last-child { border-right:none; }
+    .stat-num { font-family:'Syne',sans-serif; font-size:18px; font-weight:700; }
+    .stat-label { font-size:11px; color:var(--muted); margin-top:2px; }
+    .profile-grid { padding:14px; display:grid; grid-template-columns:1fr 1fr 1fr; gap:3px; }
+    .grid-post { aspect-ratio:1; border-radius:8px; display:flex; align-items:center; justify-content:center; overflow:hidden; cursor:pointer; background:var(--surface2); }
+
+    /* ─── SETTINGS ─── */
+    .settings-list { padding:14px; display:flex; flex-direction:column; gap:8px; }
+    .settings-item { display:flex; align-items:center; gap:12px; padding:14px; border-radius:14px; background:var(--surface); border:1px solid var(--border); cursor:pointer; transition:all 0.2s; }
+    .settings-item:active { background:var(--surface2); }
+    .settings-icon { width:38px; height:38px; border-radius:11px; display:flex; align-items:center; justify-content:center; font-size:17px; flex-shrink:0; }
+    .settings-text { flex:1; }
+    .settings-title { font-size:14px; font-weight:500; }
+    .settings-sub { font-size:11px; color:var(--muted); margin-top:2px; }
+    .settings-arrow { color:var(--muted); }
+    .toggle-switch { width:42px; height:24px; background:var(--surface2); border-radius:12px; position:relative; cursor:pointer; transition:background 0.3s; border:1px solid var(--border); }
+    .toggle-switch.on { background:var(--accent); }
+    .toggle-switch::after { content:''; position:absolute; width:18px; height:18px; background:white; border-radius:50%; top:2px; left:2px; transition:transform 0.3s; }
+    .toggle-switch.on::after { transform:translateX(18px); }
+
+    /* ─── ADMIN ─── */
+    .admin-tabs { display:flex; gap:0; border-bottom:1px solid var(--border); margin-bottom:16px; }
+    .admin-tab { flex:1; padding:12px; text-align:center; font-size:13px; font-weight:500; color:var(--muted); cursor:pointer; border-bottom:2px solid transparent; transition:all 0.2s; }
+    .admin-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+    .admin-card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:14px; margin-bottom:10px; }
+    .admin-card-header { display:flex; align-items:center; justify-content:space-between; }
+    .admin-btn { padding:8px 14px; border-radius:10px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:12px; cursor:pointer; font-family:'DM Sans',sans-serif; transition:all 0.2s; }
+    .admin-btn:active { transform:scale(0.96); }
+    .admin-btn.danger { background:rgba(252,79,108,0.15); border-color:rgba(252,79,108,0.3); color:var(--danger); }
+    .admin-btn.mod { background:rgba(108,252,202,0.1); border-color:rgba(108,252,202,0.3); color:var(--accent3); }
+    .badge-danger { background:rgba(252,79,108,0.15); color:var(--danger); font-size:11px; padding:3px 8px; border-radius:20px; border:1px solid rgba(252,79,108,0.3); }
+    .badge-ok { background:rgba(108,252,202,0.1); color:var(--accent3); font-size:11px; padding:3px 8px; border-radius:20px; border:1px solid rgba(108,252,202,0.3); }
+    .empty-state { text-align:center; padding:40px; color:var(--muted); font-size:14px; }
+    .admin-content { padding:0 14px; }
+    .admin-section-title { font-family:'Syne',sans-serif; font-size:14px; font-weight:700; margin:16px 0 10px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; font-size:11px; }
+
+    /* ─── LOADING ─── */
+    .loading-overlay { position:fixed; inset:0; z-index:900; background:rgba(10,10,15,0.85); backdrop-filter:blur(8px); display:none; flex-direction:column; align-items:center; justify-content:center; gap:16px; }
+    .loading-overlay.active { display:flex; }
+    .spinner { width:40px; height:40px; border:3px solid var(--surface2); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; }
+    @keyframes spin { to{transform:rotate(360deg)} }
+    .loading-text { color:var(--muted); font-size:14px; }
+
+    /* ─── TOAST ─── */
+    .toast { position:fixed; bottom:88px; left:50%; transform:translateX(-50%) translateY(16px); background:var(--surface2); border:1px solid var(--border); padding:9px 18px; border-radius:20px; font-size:13px; opacity:0; transition:all 0.3s; z-index:800; white-space:nowrap; pointer-events:none; }
+    .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+
+    /* ─── SEARCHING ─── */
+    #searching-overlay { position:fixed; inset:0; z-index:300; background:var(--bg); flex-direction:column; align-items:center; justify-content:center; gap:24px; display:none; }
+    .searching-dots { display:flex; gap:6px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--accent); animation:dotBounce 1.2s ease infinite; }
+    .dot:nth-child(2){animation-delay:0.2s;background:var(--accent2)}
+    .dot:nth-child(3){animation-delay:0.4s;background:var(--accent3)}
+    @keyframes dotBounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-12px)} }
+  </style>
+</head>
+<body>
+
+<!-- ══════════════════════ AUTH SCREEN ══════════════════════ -->
+<div class="screen active" id="screen-auth">
+  <div class="auth-screen">
+    <div class="auth-logo">veil</div>
+    <div class="auth-tagline">Anonim · Bebas · Nyata ✨</div>
+
+    <div class="auth-tabs">
+      <div class="auth-tab active" id="tab-login" onclick="switchAuthTab('login')">Masuk</div>
+      <div class="auth-tab" id="tab-register" onclick="switchAuthTab('register')">Daftar</div>
+    </div>
+
+    <div class="auth-form" id="auth-form-login">
+      <input type="email" class="auth-input" id="login-email" placeholder="Email kamu" />
+      <input type="password" class="auth-input" id="login-password" placeholder="Password" />
+      <button class="big-btn primary" onclick="loginUser(document.getElementById('login-email').value, document.getElementById('login-password').value)">🔐 Masuk</button>
+      <div class="auth-note">Identitasmu akan ditampilkan secara anonim kepada pengguna lain. Hanya kamu yang tahu email ini.</div>
+    </div>
+
+    <div class="auth-form" id="auth-form-register" style="display:none">
+      <input type="email" class="auth-input" id="reg-email" placeholder="Email kamu" />
+      <input type="password" class="auth-input" id="reg-password" placeholder="Password (min. 6 karakter)" />
+      <button class="big-btn primary" onclick="registerUser(document.getElementById('reg-email').value, document.getElementById('reg-password').value)">🚀 Buat Akun Anonim</button>
+      <div class="auth-note">Nama dan identitas anonimmu dibuat otomatis secara acak. Tidak ada yang tahu siapa kamu! 🎭</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ FEED SCREEN ══════════════════════ -->
+<div class="screen" id="screen-feed">
+  <div class="topbar">
+    <div class="logo">veil</div>
+    <div class="topbar-actions">
+      <div class="icon-btn">🔔</div>
+      <div class="icon-btn">🔍</div>
+    </div>
+  </div>
+  <div class="feed">
+    <div id="feed-container">
+      <div style="text-align:center;padding:60px 20px;color:var(--muted)">Memuat postingan... ✨</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ CHAT SCREEN ══════════════════════ -->
+<div class="screen" id="screen-chat">
+  <div id="chat-waiting" style="display:flex;flex-direction:column;flex:1">
+    <div class="topbar">
+      <div class="logo">veil</div>
+      <div style="font-size:12px;color:var(--muted)">Chat Anonim</div>
+    </div>
+    <div class="match-zone">
+      <div class="match-orb">💬</div>
+      <div>
+        <div class="match-title">Chat Random</div>
+        <div class="match-sub" style="margin-top:8px">Ngobrol anonim dengan orang baru. Identitasmu aman.</div>
+      </div>
+      <div style="width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px">
+        <button class="big-btn primary" onclick="startSearching('chat')">🎲 Mulai Chat Random</button>
+        <button class="big-btn secondary" onclick="showToast('Fitur topik segera hadir!')">🎯 Pilih Topik</button>
+      </div>
+    </div>
+  </div>
+  <div class="chat-room" id="chat-room">
+    <div class="chat-topbar">
+      <div class="icon-btn" onclick="endChat()">←</div>
+      <div style="flex:1;margin-left:4px">
+        <div class="chat-partner-name">🌙 Orang Asing</div>
+        <div class="chat-partner-status"><span class="status-dot"></span> Terhubung</div>
+      </div>
+      <div class="icon-btn" onclick="showToast('Pengguna dilaporkan')">⚠️</div>
+    </div>
+    <div class="messages-area" id="messages-area">
+      <div class="msg them">Halo! Apa kabar? 😊<div class="msg-time">Sekarang</div></div>
+    </div>
+    <div class="chat-input-bar">
+      <textarea class="chat-input" id="chat-input" rows="1" placeholder="Tulis pesan..." onkeydown="handleChatKey(event)"></textarea>
+      <button class="send-btn" onclick="sendMessage()">↑</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ CALL SCREEN ══════════════════════ -->
+<div class="screen" id="screen-call">
+  <div style="display:flex;flex-direction:column;flex:1">
+    <div class="topbar">
+      <div class="logo">veil</div>
+      <div style="font-size:12px;color:var(--muted)">Telepon Anonim</div>
+    </div>
+    <div class="match-zone">
+      <div class="match-orb" style="background:radial-gradient(circle at 40% 40%,#0d7377,#14a085)">📞</div>
+      <div>
+        <div class="match-title">Telepon Random</div>
+        <div class="match-sub" style="margin-top:8px">Ngobrol suara dengan orang baru. Identitas tetap aman.</div>
+      </div>
+      <div style="width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px">
+        <button class="big-btn primary" onclick="startSearching('call')">📞 Mulai Telepon Random</button>
+        <button class="big-btn secondary" onclick="showToast('Video call segera hadir! 🎥')">🎥 Video Call (Segera)</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ PROFILE SCREEN ══════════════════════ -->
+<div class="screen" id="screen-profile">
+  <div class="topbar">
+    <div class="logo">veil</div>
+    <div class="icon-btn" onclick="switchScreen('settings')">⚙️</div>
+  </div>
+  <div class="profile-hero">
+    <div class="profile-big-avatar" id="profile-emoji">🔮</div>
+    <div class="profile-name-text" id="profile-name">memuat...</div>
+    <div class="profile-handle" id="profile-handle">@...</div>
+    <div class="profile-badge" id="profile-role-badge">🎭 Anonim</div>
+  </div>
+  <div class="profile-stats">
+    <div class="stat-item">
+      <div class="stat-num" id="profile-post-count">0</div>
+      <div class="stat-label">Postingan</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">—</div>
+      <div class="stat-label">Pengikut</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">—</div>
+      <div class="stat-label">Mengikuti</div>
+    </div>
+  </div>
+  <div style="padding:14px;display:flex;gap:8px">
+    <button class="big-btn primary" style="font-size:13px;padding:12px" onclick="openModal('compose-modal')">✏️ Buat Postingan</button>
+    <button class="big-btn secondary" style="padding:12px 14px;flex:none;font-size:13px" onclick="logoutUser()">↩ Keluar</button>
+  </div>
+  <div class="profile-grid" id="profile-grid">
+    <div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--muted)">Memuat...</div>
+  </div>
+</div>
+
+<!-- ══════════════════════ SETTINGS SCREEN ══════════════════════ -->
+<div class="screen" id="screen-settings">
+  <div class="topbar">
+    <div class="icon-btn" onclick="switchScreen('profile')">←</div>
+    <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:17px">Pengaturan</div>
+    <div style="width:36px"></div>
+  </div>
+  <div class="settings-list">
+    <div class="settings-item" onclick="showNotifSettings()">
+      <div class="settings-icon" style="background:rgba(252,108,143,0.15)">🔔</div>
+      <div class="settings-text">
+        <div class="settings-title">Notifikasi</div>
+        <div class="settings-sub">Atur pemberitahuan postingan & komentar</div>
+      </div>
+      <div id="toggle-notif" class="toggle-switch on" onclick="toggleSetting(this,'notif')"></div>
+    </div>
+    <div class="settings-item">
+      <div class="settings-icon" style="background:rgba(124,108,252,0.15)">🛡️</div>
+      <div class="settings-text">
+        <div class="settings-title">Privasi</div>
+        <div class="settings-sub">Siapa yang bisa lihat postinganmu</div>
+      </div>
+      <div id="toggle-privacy" class="toggle-switch on" onclick="toggleSetting(this,'privacy')"></div>
+    </div>
+    <div class="settings-item">
+      <div class="settings-icon" style="background:rgba(108,252,202,0.15)">🌙</div>
+      <div class="settings-text">
+        <div class="settings-title">Mode Gelap</div>
+        <div class="settings-sub">Tampilan saat ini (selalu gelap)</div>
+      </div>
+      <div class="toggle-switch on"></div>
+    </div>
+    <div class="settings-item" onclick="changeAnonName()">
+      <div class="settings-icon" style="background:rgba(255,200,100,0.15)">🎭</div>
+      <div class="settings-text">
+        <div class="settings-title">Nama Anonim</div>
+        <div class="settings-sub">Acak ulang nama anonimmu</div>
+      </div>
+      <div style="color:var(--muted)">›</div>
+    </div>
+    <div class="settings-item" onclick="showAbout()">
+      <div class="settings-icon" style="background:rgba(150,150,255,0.15)">ℹ️</div>
+      <div class="settings-text">
+        <div class="settings-title">Tentang Veil</div>
+        <div class="settings-sub">Versi 1.0.0 · Platform anonim bebas</div>
+      </div>
+      <div style="color:var(--muted)">›</div>
+    </div>
+    <div class="settings-item" style="border-color:rgba(252,79,108,0.2)" onclick="logoutUser()">
+      <div class="settings-icon" style="background:rgba(252,79,108,0.1)">↩</div>
+      <div class="settings-text">
+        <div class="settings-title" style="color:var(--danger)">Keluar</div>
+        <div class="settings-sub">Logout dari akun ini</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ ADMIN SCREEN ══════════════════════ -->
+<div class="screen" id="screen-admin">
+  <div class="topbar">
+    <div class="icon-btn" onclick="switchScreen('feed')">←</div>
+    <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:17px">👑 Panel Admin</div>
+    <div class="icon-btn" onclick="loadAdminPanel()">🔄</div>
+  </div>
+  <div style="padding:0 14px">
+    <div class="admin-tabs">
+      <div class="admin-tab active" id="atab-reports" onclick="switchAdminTab('reports')">🚩 Laporan</div>
+      <div class="admin-tab" id="atab-users" onclick="switchAdminTab('users')">👤 Pengguna</div>
+    </div>
+    <div id="admin-reports" class="admin-content">
+      <div class="empty-state">Memuat laporan...</div>
+    </div>
+    <div id="admin-users" class="admin-content" style="display:none">
+      <div class="empty-state">Memuat pengguna...</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ BOTTOM NAV ══════════════════════ -->
+<nav class="bottom-nav">
+  <div class="nav-item active" id="nav-feed" onclick="switchScreen('feed')">
+    <div class="nav-icon">🏠</div>
+    <div class="nav-label">Beranda</div>
+  </div>
+  <div class="nav-item" id="nav-chat" onclick="switchScreen('chat')">
+    <div class="nav-icon">💬</div>
+    <div class="nav-label">Chat</div>
+  </div>
+  <div class="nav-item" id="nav-call" onclick="switchScreen('call')">
+    <div class="nav-icon">📞</div>
+    <div class="nav-label">Telepon</div>
+  </div>
+  <div class="nav-item" id="nav-profile" onclick="switchScreen('profile')">
+    <div class="nav-icon">👤</div>
+    <div class="nav-label">Profil</div>
+  </div>
+  <div class="nav-item" id="admin-nav-item" style="display:none" onclick="switchScreen('admin');loadAdminPanel()">
+    <div class="nav-icon">👑</div>
+    <div class="nav-label">Admin</div>
+  </div>
+</nav>
+
+<!-- ══════════════════════ FAB ══════════════════════ -->
+<button class="fab" id="fab" onclick="openModal('compose-modal')">✏️</button>
+
+<!-- ══════════════════════ CALL OVERLAY ══════════════════════ -->
+<div class="call-screen" id="call-overlay">
+  <div style="text-align:center">
+    <div class="call-avatar" style="margin:0 auto">📞</div>
+    <div class="call-name">Orang Asing #???</div>
+    <div class="call-status">Terhubung via Veil · Anonim</div>
+    <div class="call-timer" id="call-timer">00:00</div>
+  </div>
+  <div class="call-controls">
+    <button class="call-btn mute" onclick="toggleMute(this)">🎙️</button>
+    <button class="call-btn end" onclick="endCall()">📵</button>
+    <button class="call-btn speaker" onclick="showToast('Speaker aktif')">🔊</button>
+  </div>
+</div>
+
+<!-- ══════════════════════ COMPOSE MODAL ══════════════════════ -->
+<div class="modal-overlay" id="compose-modal" onclick="closeModalBg(event,'compose-modal')">
+  <div class="modal-sheet" onclick="event.stopPropagation()">
+    <div class="modal-handle"></div>
+    <div class="modal-title">Buat Postingan Anonim ✨</div>
+    <img id="compose-preview" class="compose-image-preview" style="display:none" />
+    <textarea class="compose-textarea" id="compose-text" placeholder="Apa yang mau kamu ungkapkan? Identitasmu aman..."></textarea>
+    <div class="compose-tools">
+      <div class="compose-tool" onclick="document.getElementById('compose-image-input').click()">📷 Foto</div>
+      <div class="compose-tool" onclick="showToast('Pilih gradien latar')">🎨 Gradien</div>
+      <div class="compose-tool" onclick="showToast('Tagar segera hadir!')">🏷️ Tagar</div>
+    </div>
+    <input type="file" id="compose-image-input" accept="image/*" style="display:none" onchange="previewImage(this)" />
+    <button class="big-btn primary" onclick="submitPost()" style="margin-top:8px">🚀 Posting Anonim</button>
+  </div>
+</div>
+
+<!-- ══════════════════════ COMMENTS MODAL ══════════════════════ -->
+<div class="modal-overlay" id="comments-modal" onclick="closeModalBg(event,'comments-modal')">
+  <div class="modal-sheet" onclick="event.stopPropagation()">
+    <div class="modal-handle"></div>
+    <div class="modal-title">💬 Komentar</div>
+    <div class="comments-list" id="comments-list"></div>
+    <div class="comment-input-row">
+      <input type="text" class="comment-input" id="comment-input" placeholder="Tulis komentar..." onkeydown="if(event.key==='Enter')submitComment()" />
+      <button class="comment-send-btn" onclick="submitComment()">↑</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ LOADING ══════════════════════ -->
+<div class="loading-overlay" id="loading-overlay">
+  <div class="spinner"></div>
+  <div class="loading-text" id="loading-text">Memuat...</div>
+</div>
+
+<!-- ══════════════════════ TOAST ══════════════════════ -->
+<div class="toast" id="toast"></div>
+
+<!-- ══════════════════════ SEARCHING ══════════════════════ -->
+<div id="searching-overlay">
+  <div class="searching-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
+  <div style="font-family:'Syne',sans-serif;font-size:20px;font-weight:700;text-align:center" id="searching-text">Mencari...</div>
+  <div style="color:var(--muted);font-size:13px">Menghubungkan secara anonim</div>
+  <button class="big-btn secondary" style="max-width:180px" onclick="cancelSearch()">Batalkan</button>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════
+//  UI UTILITIES
+// ═══════════════════════════════════════════════
+function switchScreen(name) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('screen-' + name).classList.add('active');
+  const navEl = document.getElementById('nav-' + name);
+  if (navEl) navEl.classList.add('active');
+  const hideFab = !['feed'].includes(name);
+  document.getElementById('fab').style.display = hideFab ? 'none' : 'flex';
+}
+
+function switchAuthTab(tab) {
+  document.getElementById('auth-form-login').style.display = tab === 'login' ? 'flex' : 'none';
+  document.getElementById('auth-form-register').style.display = tab === 'register' ? 'flex' : 'none';
+  document.getElementById('tab-login').classList.toggle('active', tab === 'login');
+  document.getElementById('tab-register').classList.toggle('active', tab === 'register');
+}
+
+function openModal(id) { document.getElementById(id).classList.add('active'); }
+function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+function closeModalBg(e, id) { if (e.target === document.getElementById(id)) closeModal(id); }
+
+let toastTimer;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+function showLoading(text) {
+  document.getElementById('loading-text').textContent = text || 'Memuat...';
+  document.getElementById('loading-overlay').classList.add('active');
+}
+function hideLoading() {
+  document.getElementById('loading-overlay').classList.remove('active');
+}
+
+function togglePostMenu(postId) {
+  const menu = document.getElementById('post-menu-' + postId);
+  if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+}
+
+function previewImage(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const preview = document.getElementById('compose-preview');
+    preview.src = e.target.result;
+    preview.style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+}
+
+// ─── Settings toggles ───
+function toggleSetting(el, key) {
+  el.classList.toggle('on');
+  const isOn = el.classList.contains('on');
+  localStorage.setItem('veil_setting_' + key, isOn);
+  showToast(isOn ? '✅ Diaktifkan' : '🔕 Dinonaktifkan');
+}
+
+function changeAnonName() {
+  if (!window.currentUserData) return;
+  showToast('Nama acak ulang segera hadir! 🎲');
+}
+
+function showAbout() {
+  alert('Veil v1.0.0\nPlatform komunitas anonim\nDibuat dengan 💜\n\nSemua identitas disembunyikan.\nAnda memegang kontrol.');
+}
+
+function showNotifSettings() {
+  showToast('Pengaturan notifikasi disimpan!');
+}
+
+// ─── Admin tabs ───
+function switchAdminTab(tab) {
+  document.getElementById('admin-reports').style.display = tab === 'reports' ? 'block' : 'none';
+  document.getElementById('admin-users').style.display = tab === 'users' ? 'block' : 'none';
+  document.getElementById('atab-reports').classList.toggle('active', tab === 'reports');
+  document.getElementById('atab-users').classList.toggle('active', tab === 'users');
+}
+
+// ─── Chat random (simulasi + WebRTC ready) ───
+let searchTimer, callTimerInterval, callSeconds = 0;
+
+function startSearching(type) {
+  const overlay = document.getElementById('searching-overlay');
+  document.getElementById('searching-text').textContent = type === 'call' ? 'Mencari lawan bicara...' : 'Mencari teman chat...';
+  overlay.style.display = 'flex';
+  const delay = 1800 + Math.random() * 1400;
+  searchTimer = setTimeout(() => {
+    overlay.style.display = 'none';
+    if (type === 'call') startCall();
+    else openChatRoom();
+  }, delay);
+}
+
+function cancelSearch() {
+  clearTimeout(searchTimer);
+  document.getElementById('searching-overlay').style.display = 'none';
+  showToast('Pencarian dibatalkan');
+}
+
+function openChatRoom() {
+  document.getElementById('chat-waiting').style.display = 'none';
+  document.getElementById('chat-room').classList.add('active');
+  showToast('🎉 Terhubung! Halo, orang asing!');
+}
+
+function endChat() {
+  document.getElementById('chat-room').classList.remove('active');
+  document.getElementById('chat-waiting').style.display = 'flex';
+  document.getElementById('messages-area').innerHTML = '<div class="msg them">Halo! Apa kabar? 😊<div class="msg-time">Sekarang</div></div>';
+  showToast('Chat berakhir. Sampai jumpa!');
+}
+
+const botReplies = ['Haha, seru banget! 😄','Wah, aku juga ngerasain hal yang sama','Terus terus, lanjutin dong 👀','Serius nih? 😮','Hmm menarik...','Makasih udah cerita ya 🥺','Emang gitu sih 😅','Wkwk lucu banget!'];
+
+function sendMessage() {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  const area = document.getElementById('messages-area');
+  const now = new Date();
+  const time = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
+  const myMsg = document.createElement('div');
+  myMsg.className = 'msg me';
+  myMsg.innerHTML = `${text}<div class="msg-time">${time}</div>`;
+  area.appendChild(myMsg);
+  input.value = '';
+  area.scrollTop = area.scrollHeight;
+  setTimeout(() => {
+    const reply = botReplies[Math.floor(Math.random()*botReplies.length)];
+    const botMsg = document.createElement('div');
+    botMsg.className = 'msg them';
+    botMsg.innerHTML = `${reply}<div class="msg-time">${time}</div>`;
+    area.appendChild(botMsg);
+    area.scrollTop = area.scrollHeight;
+  }, 900 + Math.random()*800);
+}
+
+function handleChatKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+
+function startCall() {
+  document.getElementById('call-overlay').classList.add('active');
+  callSeconds = 0;
+  callTimerInterval = setInterval(() => {
+    callSeconds++;
+    const m = Math.floor(callSeconds/60).toString().padStart(2,'0');
+    const s = (callSeconds%60).toString().padStart(2,'0');
+    document.getElementById('call-timer').textContent = `${m}:${s}`;
+  }, 1000);
+}
+
+function endCall() {
+  document.getElementById('call-overlay').classList.remove('active');
+  clearInterval(callTimerInterval);
+  showToast('📵 Panggilan berakhir · ' + document.getElementById('call-timer').textContent);
+}
+
+function toggleMute(btn) {
+  const muted = btn.textContent === '🔇';
+  btn.textContent = muted ? '🎙️' : '🔇';
+  showToast(muted ? 'Mikrofon aktif' : 'Mikrofon dimatikan');
+}
+
+// ─── PWA Install ───
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredPrompt = e;
+  setTimeout(() => showToast('💡 Tambahkan ke layar utama untuk pengalaman terbaik!'), 4000);
+});
+</script>
+</body>
+</html>
