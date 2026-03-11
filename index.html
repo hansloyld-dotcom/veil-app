@@ -26,9 +26,9 @@
     // ═══════════════════════════════════════════════════
     const firebaseConfig = {
       apiKey: "AIzaSyDp6kSEL6nhvi-H0CI8ocjCFRz3qiHnU9c",
-      authDomain: "AIzaSyDp6kSEL6nhvi-H0CI8ocjCFRz3qiHnU9c",
+      authDomain: "veil-app-d7cf8.firebaseapp.com",
       projectId: "veil-app-d7cf8",
-      storageBucket:  "veil-app-d7cf8.firebasestorage.app",
+      storageBucket: "veil-app-d7cf8.firebasestorage.app",
       messagingSenderId: "811790397897",
       appId: "1:811790397897:web:71bd7b2e2e8b85bc037818"
     };
@@ -42,6 +42,11 @@
     const auth = getAuth(app);
     const db = getFirestore(app);
     const storage = getStorage(app);
+
+    // Expose ke window agar script non-module bisa akses
+    window._db = db;
+    window._auth = auth;
+    window._storage = storage;
 
     // ─── Device Fingerprint (untuk ban device) ───
     function getDeviceId() {
@@ -179,10 +184,12 @@
     onAuthStateChanged(auth, async (user) => {
       if (user) {
         currentUser = user;
+        window._currentUser = user;
         const snap = await getDoc(doc(db, 'users', user.uid));
         if (snap.exists()) {
           currentUserData = snap.data();
           window.currentUserData = currentUserData;
+          window._currentUserData = currentUserData;
 
           // Update UI profil
           document.getElementById('profile-emoji').textContent = currentUserData.anonEmoji;
@@ -204,8 +211,10 @@
         }
       } else {
         currentUser = null;
+        window._currentUser = null;
         currentUserData = null;
         window.currentUserData = null;
+        window._currentUserData = null;
         if (unsubFeed) unsubFeed();
         switchScreen('auth');
       }
@@ -1307,53 +1316,349 @@ function startSearching(type) {
 function cancelSearch() {
   clearTimeout(searchTimer);
   document.getElementById('searching-overlay').style.display = 'none';
+  // Jika sedang dalam queue, hapus dari Firestore
+  if (window._chatQueueId) {
+    import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js").then(({getFirestore, doc, deleteDoc}) => {
+      deleteDoc(doc(window._db, 'chat_queue', window._chatQueueId));
+    });
+    window._chatQueueId = null;
+  }
+  if (window._chatRoomUnsub) { window._chatRoomUnsub(); window._chatRoomUnsub = null; }
   showToast('Pencarian dibatalkan');
 }
 
-function openChatRoom() {
+// ══════════════════════════════════════════════
+//  REAL RANDOM CHAT — Firebase Firestore
+// ══════════════════════════════════════════════
+async function startSearching(type) {
+  if (!window._currentUser) return showToast('Login dulu!');
+  const overlay = document.getElementById('searching-overlay');
+  document.getElementById('searching-text').textContent = type === 'call' ? 'Mencari lawan bicara...' : 'Mencari teman chat...';
+  overlay.style.display = 'flex';
+
+  if (type === 'chat') {
+    await startRealChat();
+  } else {
+    await startRealCall();
+  }
+}
+
+async function startRealChat() {
+  const { getFirestore, collection, query, where, getDocs, addDoc, doc, updateDoc, onSnapshot, serverTimestamp, deleteDoc, orderBy, limit }
+    = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+  const db = window._db;
+  const uid = window._currentUser.uid;
+  const userData = window._currentUserData;
+
+  // Cari user lain yang sedang menunggu di queue
+  const qSnap = await getDocs(query(
+    collection(db, 'chat_queue'),
+    where('status', '==', 'waiting'),
+    where('uid', '!=', uid),
+    limit(1)
+  ));
+
+  if (!qSnap.empty) {
+    // Ada yang menunggu — buat room baru
+    const otherDoc = qSnap.docs[0];
+    const other = otherDoc.data();
+    const roomRef = await addDoc(collection(db, 'chat_rooms'), {
+      users: [uid, other.uid],
+      userNames: { [uid]: userData.anonName, [other.uid]: other.anonName },
+      userEmojis: { [uid]: userData.anonEmoji, [other.uid]: other.anonEmoji },
+      createdAt: serverTimestamp(),
+      active: true
+    });
+    // Tandai queue lawan sebagai matched
+    await updateDoc(doc(db, 'chat_queue', otherDoc.id), { status: 'matched', roomId: roomRef.id });
+    // Hapus queue kita kalau ada
+    if (window._chatQueueId) await deleteDoc(doc(db, 'chat_queue', window._chatQueueId));
+    window._chatQueueId = null;
+    document.getElementById('searching-overlay').style.display = 'none';
+    openRealChatRoom(roomRef.id, other.anonEmoji + ' ' + other.anonName);
+  } else {
+    // Tidak ada yang menunggu — masuk queue
+    const qRef = await addDoc(collection(db, 'chat_queue'), {
+      uid, anonName: userData.anonName, anonEmoji: userData.anonEmoji,
+      status: 'waiting', type: 'chat', createdAt: serverTimestamp()
+    });
+    window._chatQueueId = qRef.id;
+    // Dengarkan apakah kita dicocokkan
+    const unsub = onSnapshot(doc(db, 'chat_queue', qRef.id), async (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (data.status === 'matched' && data.roomId) {
+        unsub();
+        window._chatQueueId = null;
+        document.getElementById('searching-overlay').style.display = 'none';
+        // Ambil info lawan dari room
+        const { getDoc } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+        const roomSnap = await getDoc(doc(db, 'chat_rooms', data.roomId));
+        const room = roomSnap.data();
+        const otherUid = room.users.find(u => u !== uid);
+        const partnerName = (room.userEmojis[otherUid]||'🎭') + ' ' + (room.userNames[otherUid]||'Orang Asing');
+        openRealChatRoom(data.roomId, partnerName);
+      }
+    });
+    // Auto-cancel setelah 60 detik
+    searchTimer = setTimeout(async () => {
+      unsub();
+      await deleteDoc(doc(db, 'chat_queue', qRef.id));
+      window._chatQueueId = null;
+      document.getElementById('searching-overlay').style.display = 'none';
+      showToast('Tidak ada yang online saat ini. Coba lagi nanti!');
+    }, 60000);
+  }
+}
+
+function openRealChatRoom(roomId, partnerName) {
+  window._currentRoomId = roomId;
   document.getElementById('chat-waiting').style.display = 'none';
-  document.getElementById('chat-room').classList.add('active');
-  showToast('🎉 Terhubung! Halo, orang asing!');
+  const room = document.getElementById('chat-room');
+  room.classList.add('active');
+  room.querySelector('.chat-partner-name').textContent = partnerName;
+  document.getElementById('messages-area').innerHTML = `
+    <div style="text-align:center;padding:20px;color:var(--muted);font-size:12px">
+      🔒 Terhubung secara anonim · Pesan tidak disimpan permanen
+    </div>`;
+  showToast('🎉 Terhubung dengan ' + partnerName + '!');
+
+  // Dengarkan pesan masuk secara realtime
+  import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js").then(({ getFirestore, collection, query, orderBy, onSnapshot }) => {
+    const db = window._db;
+    const q = query(collection(db, 'chat_rooms', roomId, 'messages'), orderBy('createdAt', 'asc'));
+    if (window._chatRoomUnsub) window._chatRoomUnsub();
+    window._chatRoomUnsub = onSnapshot(q, (snap) => {
+      snap.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const msg = change.doc.data();
+          if (msg.uid === window._currentUser.uid) return; // Skip pesan sendiri (sudah ditampilkan)
+          const area = document.getElementById('messages-area');
+          const div = document.createElement('div');
+          div.className = 'msg them';
+          const t = msg.createdAt?.toDate ? msg.createdAt.toDate() : new Date();
+          const time = `${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`;
+          div.innerHTML = `${escHtmlUI(msg.text)}<div class="msg-time">${time}</div>`;
+          area.appendChild(div);
+          area.scrollTop = area.scrollHeight;
+        }
+      });
+    });
+  });
 }
 
-function endChat() {
-  document.getElementById('chat-room').classList.remove('active');
-  document.getElementById('chat-waiting').style.display = 'flex';
-  document.getElementById('messages-area').innerHTML = '<div class="msg them">Halo! Apa kabar? 😊<div class="msg-time">Sekarang</div></div>';
-  showToast('Chat berakhir. Sampai jumpa!');
-}
-
-const botReplies = ['Haha, seru banget! 😄','Wah, aku juga ngerasain hal yang sama','Terus terus, lanjutin dong 👀','Serius nih? 😮','Hmm menarik...','Makasih udah cerita ya 🥺','Emang gitu sih 😅','Wkwk lucu banget!'];
-
-function sendMessage() {
+async function sendMessage() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
   if (!text) return;
+  if (!window._currentUser) return;
+
   const area = document.getElementById('messages-area');
   const now = new Date();
   const time = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
+
+  // Tampilkan pesan sendiri langsung
   const myMsg = document.createElement('div');
   myMsg.className = 'msg me';
-  myMsg.innerHTML = `${text}<div class="msg-time">${time}</div>`;
+  myMsg.innerHTML = `${escHtmlUI(text)}<div class="msg-time">${time}</div>`;
   area.appendChild(myMsg);
   input.value = '';
   area.scrollTop = area.scrollHeight;
-  setTimeout(() => {
-    const reply = botReplies[Math.floor(Math.random()*botReplies.length)];
-    const botMsg = document.createElement('div');
-    botMsg.className = 'msg them';
-    botMsg.innerHTML = `${reply}<div class="msg-time">${time}</div>`;
-    area.appendChild(botMsg);
-    area.scrollTop = area.scrollHeight;
-  }, 900 + Math.random()*800);
+
+  // Simpan ke Firestore jika ada room aktif
+  if (window._currentRoomId) {
+    const { getFirestore, collection, addDoc, serverTimestamp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+    await addDoc(collection(window._db, 'chat_rooms', window._currentRoomId, 'messages'), {
+      text, uid: window._currentUser.uid,
+      anonName: window._currentUserData.anonName,
+      createdAt: serverTimestamp()
+    });
+  }
+}
+
+function escHtmlUI(str) {
+  return (str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+async function endChat() {
+  if (window._chatRoomUnsub) { window._chatRoomUnsub(); window._chatRoomUnsub = null; }
+  // Tandai room sebagai tidak aktif
+  if (window._currentRoomId) {
+    const { getFirestore, doc, updateDoc } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+    await updateDoc(doc(window._db, 'chat_rooms', window._currentRoomId), { active: false });
+    window._currentRoomId = null;
+  }
+  document.getElementById('chat-room').classList.remove('active');
+  document.getElementById('chat-waiting').style.display = 'flex';
+  document.getElementById('messages-area').innerHTML = '';
+  showToast('Chat berakhir. Sampai jumpa! 👋');
 }
 
 function handleChatKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 }
 
-function startCall() {
+// ══════════════════════════════════════════════
+//  REAL VOICE CALL — WebRTC + Firebase Signaling
+// ══════════════════════════════════════════════
+let localStream = null, peerConnection = null, callTimerInterval, callSeconds = 0;
+const ICE_SERVERS = { iceServers: [{ urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }] };
+
+async function startRealCall() {
+  const { collection, query, where, getDocs, addDoc, doc, updateDoc, onSnapshot, serverTimestamp, deleteDoc, limit }
+    = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+  const db = window._db;
+  const uid = window._currentUser.uid;
+
+  // Minta izin mikrofon dulu
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  } catch(e) {
+    document.getElementById('searching-overlay').style.display = 'none';
+    showToast('❌ Izin mikrofon ditolak. Aktifkan di pengaturan browser.');
+    return;
+  }
+
+  // Cari user lain yang sedang antre panggilan
+  const qSnap = await getDocs(query(
+    collection(db, 'call_queue'),
+    where('status', '==', 'waiting'),
+    where('uid', '!=', uid),
+    limit(1)
+  ));
+
+  if (!qSnap.empty) {
+    // Ada yang menunggu — kita jadi CALLEE, buat peer connection
+    const otherDoc = qSnap.docs[0];
+    const other = otherDoc.data();
+    // Tandai sebagai matched
+    await updateDoc(doc(db, 'call_queue', otherDoc.id), { status: 'matched', calleeUid: uid });
+
+    // Buat peer connection sebagai callee
+    peerConnection = new RTCPeerConnection(ICE_SERVERS);
+    localStream.getTracks().forEach(t => peerConnection.addTrack(t, localStream));
+
+    peerConnection.ontrack = e => {
+      const audio = document.getElementById('remote-audio') || (() => {
+        const a = document.createElement('audio'); a.id = 'remote-audio'; a.autoplay = true;
+        document.body.appendChild(a); return a;
+      })();
+      audio.srcObject = e.streams[0];
+    };
+
+    // Dengarkan offer dari caller
+    const callDocRef = doc(db, 'calls', otherDoc.id);
+    const unsubCall = onSnapshot(callDocRef, async (snap) => {
+      if (!snap.exists()) return;
+      const callData = snap.data();
+      if (callData.offer && !peerConnection.currentRemoteDescription) {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(callData.offer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        await updateDoc(callDocRef, { answer: { type: answer.type, sdp: answer.sdp } });
+        unsubCall();
+      }
+    });
+
+    // ICE candidates
+    peerConnection.onicecandidate = async e => {
+      if (e.candidate) {
+        const { addDoc, collection } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+        await addDoc(collection(db, 'calls', otherDoc.id, 'callee_candidates'), e.candidate.toJSON());
+      }
+    };
+    peerConnection.oniceconnectionstatechange = () => {
+      if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
+        document.getElementById('searching-overlay').style.display = 'none';
+        showCallUI(other.anonEmoji + ' ' + other.anonName, otherDoc.id);
+      }
+    };
+    window._currentCallId = otherDoc.id;
+
+  } else {
+    // Tidak ada yang menunggu — kita jadi CALLER
+    const qRef = await addDoc(collection(db, 'call_queue'), {
+      uid, anonName: window._currentUserData.anonName, anonEmoji: window._currentUserData.anonEmoji,
+      status: 'waiting', createdAt: serverTimestamp()
+    });
+    window._callQueueId = qRef.id;
+
+    // Buat peer connection sebagai caller
+    peerConnection = new RTCPeerConnection(ICE_SERVERS);
+    localStream.getTracks().forEach(t => peerConnection.addTrack(t, localStream));
+
+    peerConnection.ontrack = e => {
+      const audio = document.getElementById('remote-audio') || (() => {
+        const a = document.createElement('audio'); a.id = 'remote-audio'; a.autoplay = true;
+        document.body.appendChild(a); return a;
+      })();
+      audio.srcObject = e.streams[0];
+    };
+
+    // Buat offer
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    const { setDoc } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+    await setDoc(doc(db, 'calls', qRef.id), {
+      offer: { type: offer.type, sdp: offer.sdp },
+      callerUid: uid, createdAt: serverTimestamp()
+    });
+
+    // ICE candidates
+    peerConnection.onicecandidate = async e => {
+      if (e.candidate) {
+        const { addDoc, collection } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+        await addDoc(collection(db, 'calls', qRef.id, 'caller_candidates'), e.candidate.toJSON());
+      }
+    };
+
+    // Dengarkan answer dari callee
+    const unsubAnswer = onSnapshot(doc(db, 'calls', qRef.id), async (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (data.answer && !peerConnection.currentRemoteDescription) {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+        unsubAnswer();
+        // Dengarkan ICE candidates dari callee
+        onSnapshot(collection(db, 'calls', qRef.id, 'callee_candidates'), snap => {
+          snap.docChanges().forEach(change => {
+            if (change.type === 'added') peerConnection.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+          });
+        });
+      }
+    });
+
+    // Dengarkan saat dicocokkan
+    const unsubQ = onSnapshot(doc(db, 'call_queue', qRef.id), async (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (data.status === 'matched') {
+        unsubQ();
+        window._currentCallId = qRef.id;
+      }
+    });
+
+    peerConnection.oniceconnectionstatechange = () => {
+      if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
+        document.getElementById('searching-overlay').style.display = 'none';
+        showCallUI('🎭 Orang Asing', qRef.id);
+      }
+    };
+
+    // Timeout 60 detik
+    searchTimer = setTimeout(async () => {
+      document.getElementById('searching-overlay').style.display = 'none';
+      endCall();
+      await deleteDoc(doc(db, 'call_queue', qRef.id));
+      showToast('Tidak ada yang online saat ini. Coba lagi!');
+    }, 60000);
+  }
+}
+
+function showCallUI(partnerName, callId) {
+  window._currentCallId = callId;
   document.getElementById('call-overlay').classList.add('active');
+  document.querySelector('.call-name').textContent = partnerName;
   callSeconds = 0;
   callTimerInterval = setInterval(() => {
     callSeconds++;
@@ -1361,18 +1666,44 @@ function startCall() {
     const s = (callSeconds%60).toString().padStart(2,'0');
     document.getElementById('call-timer').textContent = `${m}:${s}`;
   }, 1000);
+  showToast('📞 Terhubung dengan ' + partnerName + '!');
 }
 
-function endCall() {
+async function endCall() {
   document.getElementById('call-overlay').classList.remove('active');
   clearInterval(callTimerInterval);
-  showToast('📵 Panggilan berakhir · ' + document.getElementById('call-timer').textContent);
+  const dur = document.getElementById('call-timer').textContent;
+  if (peerConnection) { peerConnection.close(); peerConnection = null; }
+  if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+  const audio = document.getElementById('remote-audio');
+  if (audio) audio.srcObject = null;
+  // Tandai panggilan selesai
+  if (window._currentCallId) {
+    const { doc, updateDoc } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+    await updateDoc(doc(window._db, 'calls', window._currentCallId), { ended: true }).catch(()=>{});
+    window._currentCallId = null;
+  }
+  if (window._callQueueId) {
+    const { doc, deleteDoc } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+    await deleteDoc(doc(window._db, 'call_queue', window._callQueueId)).catch(()=>{});
+    window._callQueueId = null;
+  }
+  showToast('📵 Panggilan berakhir · ' + dur);
 }
 
 function toggleMute(btn) {
-  const muted = btn.textContent === '🔇';
-  btn.textContent = muted ? '🎙️' : '🔇';
-  showToast(muted ? 'Mikrofon aktif' : 'Mikrofon dimatikan');
+  if (localStream) {
+    const audioTrack = localStream.getAudioTracks()[0];
+    if (audioTrack) {
+      audioTrack.enabled = !audioTrack.enabled;
+      btn.textContent = audioTrack.enabled ? '🎙️' : '🔇';
+      showToast(audioTrack.enabled ? 'Mikrofon aktif' : 'Mikrofon dimatikan');
+    }
+  } else {
+    const muted = btn.textContent === '🔇';
+    btn.textContent = muted ? '🎙️' : '🔇';
+    showToast(muted ? 'Mikrofon aktif' : 'Mikrofon dimatikan');
+  }
 }
 
 // ─── PWA Install ───
