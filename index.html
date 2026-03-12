@@ -496,7 +496,7 @@
       if (!currentUserData || (currentUserData.role !== 'admin' && currentUserData.role !== 'moderator')) return;
 
       // Load reports
-      const reportsSnap = await getDocs(query(collection(db, 'reports'), where('status','==','pending'), orderBy('createdAt','desc')));
+      const reportsSnap = await getDocs(query(collection(db, 'reports'), where('status','==','pending')));
       const reportsDiv = document.getElementById('admin-reports');
       reportsDiv.innerHTML = '';
       if (reportsSnap.empty) {
@@ -523,7 +523,7 @@
       }
 
       // Load users
-      const usersSnap = await getDocs(query(collection(db, 'users'), orderBy('createdAt','desc')));
+      const usersSnap = await getDocs(collection(db, 'users'));
       const usersDiv = document.getElementById('admin-users');
       usersDiv.innerHTML = '';
       usersSnap.forEach(d => {
@@ -563,7 +563,7 @@
       modal.classList.add('active');
       document.getElementById('comments-list').innerHTML = '<div style="text-align:center;padding:20px;color:var(--muted)">Memuat komentar...</div>';
 
-      const q = query(collection(db, 'posts', postId, 'comments'), orderBy('createdAt','asc'));
+      const q = collection(db, 'posts', postId, 'comments');
       const snap = await getDocs(q);
       const list = document.getElementById('comments-list');
       list.innerHTML = '';
@@ -612,7 +612,7 @@
     // ══════════════════════════════════════════════════════
     window.loadProfilePosts = async function() {
       if (!currentUser) return;
-      const q = query(collection(db, 'posts'), where('uid','==',currentUser.uid), orderBy('createdAt','desc'));
+      const q = query(collection(db, 'posts'), where('uid','==',currentUser.uid));
       const snap = await getDocs(q);
       const grid = document.getElementById('profile-grid');
       grid.innerHTML = '';
@@ -1315,13 +1315,11 @@ async function startRealChat() {
   const uid = window._currentUser.uid;
   const userData = window._currentUserData;
 
-  // Cari user lain yang sedang menunggu di queue
-  const qSnap = await getDocs(query(
-    collection(db, 'chat_queue'),
-    where('status', '==', 'waiting'),
-    where('uid', '!=', uid),
-    limit(1)
-  ));
+  // Cari user lain — filter client-side (tanpa composite index)
+  const allWaiting = await getDocs(query(collection(db, 'chat_queue'), where('status','==','waiting'), limit(10)));
+  let matchedOther = null;
+  for (const d of allWaiting.docs) { if (d.data().uid !== uid) { matchedOther = d; break; } }
+  const qSnap = matchedOther ? { empty: false, docs: [matchedOther] } : { empty: true, docs: [] };
 
   if (!qSnap.empty) {
     // Ada yang menunggu — buat room baru
@@ -1484,13 +1482,11 @@ async function startRealCall() {
     return;
   }
 
-  // Cari user lain yang sedang antre panggilan
-  const qSnap = await getDocs(query(
-    collection(db, 'call_queue'),
-    where('status', '==', 'waiting'),
-    where('uid', '!=', uid),
-    limit(1)
-  ));
+  // Cari user lain untuk call — filter client-side
+  const allWaitingCall = await getDocs(query(collection(db, 'call_queue'), where('status','==','waiting'), limit(10)));
+  let matchedCall = null;
+  for (const d of allWaitingCall.docs) { if (d.data().uid !== uid) { matchedCall = d; break; } }
+  const qSnap = matchedCall ? { empty: false, docs: [matchedCall] } : { empty: true, docs: [] };
 
   if (!qSnap.empty) {
     // Ada yang menunggu — kita jadi CALLEE, buat peer connection
